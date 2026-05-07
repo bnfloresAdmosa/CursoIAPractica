@@ -1,0 +1,472 @@
+version: 1.0
+generated: 2026-05-06
+title: "Mini Jira — Database Schema (canónico)"
+target_engine: "Microsoft SQL Server 2022"
+sources:
+  - Specs-MiniJira/specs.md
+  - api-contract.md
+  - Base-Specs/er.md
+  - Base-Specs/mock.sql
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Convenciones globales
+# ─────────────────────────────────────────────────────────────────────────────
+conventions:
+  ids:
+    type: "INT IDENTITY(1,1)"
+    notes: |
+      Todos los PKs son INT autoincrementales salvo `priority` (catálogo cerrado
+      con IDs hardcodeados 1=Alta, 2=Media, 3=Baja). Las tablas N:M usan PK
+      compuesta sin id sintético (ticket_assignee, ticket_tag, project_member).
+      INT (4 bytes, max ~2.1B) es suficiente para el caso de uso de 10 usuarios.
+  timestamps:
+    type: "DATETIME2(3)"
+    timezone: "UTC siempre — la app convierte a local en presentación"
+    default: "SYSUTCDATETIME()"
+    notes: "DATETIME2 sobre DATETIMEOFFSET para evitar mezclar tipos cuando todo es UTC."
+  strings:
+    standard: "NVARCHAR(255)"
+    long_text: "NVARCHAR(MAX)"
+    notes: "NVARCHAR para soporte Unicode completo (acentos, ñ, emojis)."
+  soft_delete:
+    project: "archived_at"
+    ticket: "archived_at"
+    comment: "deleted_at"
+    notes: |
+      Nunca DELETE físico salvo en `refresh_token` (artefactos transitorios).
+      Filtros default WHERE archived_at IS NULL / deleted_at IS NULL.
+  immutability:
+    audit_log: "INSERT-only desde la app. En prod: DENY UPDATE/DELETE al rol de aplicación."
+  authorization:
+    db_user_app: "SELECT/INSERT/UPDATE en todas las tablas de negocio"
+    audit_log_grants: "GRANT SELECT, INSERT; DENY UPDATE, DELETE"
+    refresh_token_grants: "SELECT, INSERT, UPDATE, DELETE (única tabla con DELETE permitido)"
+  fk_policy:
+    on_delete: "NO ACTION en todas las FKs"
+    rationale: "Soft delete es la política universal; cascadas violarían auditabilidad."
+  collation:
+    default: "Latin1_General_CI_AS (case-insensitive, accent-sensitive)"
+    notes: "Suficiente para herramienta interna en español. email comparisons quedan CI por default."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resumen de entidades
+# ─────────────────────────────────────────────────────────────────────────────
+entities_summary:
+  - { table: user,            category: core,    soft_delete: false, notes: "Identidad por email" }
+  - { table: project,         category: core,    soft_delete: true,  notes: "archived_at" }
+  - { table: project_member,  category: join,    soft_delete: false, notes: "PK compuesta (user_id, project_id)" }
+  - { table: priority,        category: catalog, soft_delete: false, notes: "Catálogo cerrado, 3 filas" }
+  - { table: tag,             category: catalog, soft_delete: false, notes: "Catálogo global, 5 filas seed" }
+  - { table: ticket,          category: core,    soft_delete: true,  notes: "archived_at; CHECK status" }
+  - { table: ticket_assignee, category: join,    soft_delete: false, notes: "PK compuesta (ticket_id, user_id)" }
+  - { table: ticket_tag,      category: join,    soft_delete: false, notes: "PK compuesta (ticket_id, tag_id)" }
+  - { table: comment,         category: core,    soft_delete: true,  notes: "deleted_at" }
+  - { table: audit_log,       category: audit,   soft_delete: false, notes: "INMUTABLE — DENY UPDATE/DELETE" }
+  - { table: ticket_lock,     category: state,   soft_delete: false, notes: "Pessimistic lock con TTL 15min" }
+  - { table: refresh_token,   category: auth,    soft_delete: false, notes: "Único caso con DELETE físico (cleanup)" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tablas
+# ─────────────────────────────────────────────────────────────────────────────
+tables:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: user
+    category: core
+    description: "Cuentas de usuario del sistema. La identidad de login es el email."
+    columns:
+      - { name: id,            type: INT,            pk: true, identity: true }
+      - { name: name,          type: NVARCHAR(255),  not_null: true }
+      - { name: email,         type: NVARCHAR(255),  not_null: true, collation: "Latin1_General_CI_AS", notes: "Collation explícita per-column → invariante a la collation default del server (evita bug si se despliega sobre un server case-sensitive)" }
+      - { name: password_hash, type: NVARCHAR(255),  not_null: true, notes: "bcrypt cost factor ≥ 12" }
+      - { name: created_at,    type: DATETIME2(3),   not_null: true, default: "SYSUTCDATETIME()" }
+    constraints:
+      - { type: unique, name: uq_user_email, columns: [email] }
+    indexes:
+      - { name: ix_user_email, columns: [email], unique: true, notes: "Login lookup" }
+    business_rules:
+      - "Email = identidad de login (HU-01)."
+      - "password_hash JAMÁS se expone en respuestas API."
+      - "Comparaciones por email case-insensitive (default collation lo cubre)."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: project
+    category: core
+    description: "Proyectos del workspace. Soft-deletable."
+    columns:
+      - { name: id,           type: INT,            pk: true, identity: true }
+      - { name: name,         type: NVARCHAR(255),  not_null: true }
+      - { name: description,  type: NVARCHAR(MAX),  not_null: false }
+      - { name: archived_at,  type: DATETIME2(3),   not_null: false, notes: "soft delete; NULL = activo" }
+      - { name: created_by,   type: INT,            not_null: true }
+      - { name: created_at,   type: DATETIME2(3),   not_null: true, default: "SYSUTCDATETIME()" }
+    foreign_keys:
+      - { name: fk_project_created_by, columns: [created_by], references: { table: user, columns: [id] }, on_delete: NO_ACTION }
+    indexes:
+      - { name: ix_project_archived_at, columns: [archived_at], notes: "Filtro Activos/Archivados" }
+      - { name: ix_project_created_by,  columns: [created_by] }
+    business_rules:
+      - "El creador queda automáticamente como ADMIN en project_member (HU-03)."
+      - "Los nombres NO son únicos globalmente (HU-03 borde)."
+      - "archived_at != NULL = soft-deleted; nunca DELETE físico (HU-04)."
+      - "Re-archivar es idempotente: actualiza archived_at al timestamp actual (HU-04 borde)."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: project_member
+    category: join
+    description: "Pertenencia de usuarios a proyectos con rol diferenciado."
+    columns:
+      - { name: user_id,    type: INT,           not_null: true }
+      - { name: project_id, type: INT,           not_null: true }
+      - { name: role,       type: NVARCHAR(10),  not_null: true }
+      - { name: added_at,   type: DATETIME2(3),  not_null: true, default: "SYSUTCDATETIME()" }
+    constraints:
+      - { type: pk,    name: pk_project_member,        columns: [user_id, project_id] }
+      - { type: check, name: ck_project_member_role,   expression: "role IN ('ADMIN', 'USER')" }
+    foreign_keys:
+      - { name: fk_pm_user,    columns: [user_id],    references: { table: user,    columns: [id] }, on_delete: NO_ACTION }
+      - { name: fk_pm_project, columns: [project_id], references: { table: project, columns: [id] }, on_delete: NO_ACTION }
+    indexes:
+      - { name: ix_pm_project_role, columns: [project_id, role], notes: "Listar admins de un proyecto" }
+      - { name: ix_pm_user,         columns: [user_id], notes: "Proyectos a los que pertenece un usuario" }
+    business_rules:
+      - "Un mismo usuario puede ser ADMIN en un proyecto y USER en otro (PRD §2.1, HU-02)."
+      - "No existe SUPERADMIN global (PRD §3)."
+      - "Cada proyecto debe tener ≥1 ADMIN (validación a nivel app en PATCH/DELETE — api-contract.md §3.5)."
+      - "Quitar un miembro NO archiva sus tickets, pero pierde permisos (HU-09)."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: priority
+    category: catalog
+    description: "Catálogo cerrado de prioridades. Filas predefinidas; no se crean en runtime."
+    columns:
+      - { name: id,    type: INT,           pk: true, identity: false, notes: "IDs hardcodeados (1, 2, 3)" }
+      - { name: name,  type: NVARCHAR(50),  not_null: true }
+      - { name: order, type: SMALLINT,      not_null: true, notes: "T-SQL requiere [order] entre brackets (palabra reservada)" }
+    constraints:
+      - { type: unique, name: uq_priority_name,  columns: [name] }
+      - { type: unique, name: uq_priority_order, columns: [order] }
+    seed:
+      - { id: 1, name: "Alta",  order: 1 }
+      - { id: 2, name: "Media", order: 2 }
+      - { id: 3, name: "Baja",  order: 3 }
+    business_rules:
+      - "Catálogo cerrado; agregar una prioridad nueva requiere migración + actualizar UI/types."
+      - "El campo `order` se usa para sort en UI (Alta primero)."
+      - "Identifier `order` requiere brackets `[order]` en T-SQL — Prisma lo maneja vía @map."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: tag
+    category: catalog
+    description: "Catálogo global de etiquetas. Cualquier Admin (de cualquier proyecto) puede CRUD."
+    columns:
+      - { name: id,    type: INT,           pk: true, identity: true }
+      - { name: name,  type: NVARCHAR(50),  not_null: true }
+      - { name: color, type: VARCHAR(7),    not_null: true, notes: "Formato '#RRGGBB' (hex 7 chars incluido el #)" }
+    constraints:
+      - { type: unique, name: uq_tag_name,  columns: [name] }
+      - { type: check,  name: ck_tag_color, expression: "color LIKE '#______'" }
+    indexes:
+      - { name: ix_tag_name, columns: [name], unique: true }
+    seed:
+      - { id: 1, name: "bug",            color: "#EF4444" }
+      - { id: 2, name: "feature",        color: "#3B82F6" }
+      - { id: 3, name: "mejora",         color: "#F59E0B" }
+      - { id: 4, name: "seguridad",      color: "#8B5CF6" }
+      - { id: 5, name: "deuda-técnica",  color: "#6B7280" }
+    business_rules:
+      - "Catálogo GLOBAL (api-contract.md §8 #2 — decisión aprobada)."
+      - "Cualquier usuario con rol ADMIN en cualquier project_member puede CRUD."
+      - "DELETE de un tag elimina sus filas en ticket_tag (cascada gestionada por la app, no por FK ON DELETE CASCADE — preserva auditabilidad)."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: ticket
+    category: core
+    description: |
+      Tareas del backlog. Soft-deletable. Status almacenado como string en español
+      (match con audit_log.new_value y mock.sql). Transiciones de estado libres.
+    columns:
+      - { name: id,           type: INT,            pk: true, identity: true }
+      - { name: title,        type: NVARCHAR(255),  not_null: true }
+      - { name: description,  type: NVARCHAR(MAX),  not_null: false }
+      - { name: status,       type: NVARCHAR(20),   not_null: true, default: "'Por hacer'" }
+      - { name: priority_id,  type: INT,            not_null: true }
+      - { name: project_id,   type: INT,            not_null: true }
+      - { name: created_by,   type: INT,            not_null: true, notes: "EC-MVP-02 score 6 ALTO — NOT NULL enforced en BD, no solo en app" }
+      - { name: archived_at,  type: DATETIME2(3),   not_null: false }
+      - { name: created_at,   type: DATETIME2(3),   not_null: true, default: "SYSUTCDATETIME()" }
+      - { name: updated_at,   type: DATETIME2(3),   not_null: true, default: "SYSUTCDATETIME()" }
+    constraints:
+      - { type: check, name: ck_ticket_status,           expression: "status IN ('Por hacer', 'En progreso', 'Listo')" }
+      - { type: check, name: ck_ticket_title_nonempty,   expression: "LEN(title) > 0" }
+    foreign_keys:
+      - { name: fk_ticket_priority,   columns: [priority_id], references: { table: priority, columns: [id] }, on_delete: NO_ACTION }
+      - { name: fk_ticket_project,    columns: [project_id],  references: { table: project,  columns: [id] }, on_delete: NO_ACTION }
+      - { name: fk_ticket_created_by, columns: [created_by],  references: { table: user,     columns: [id] }, on_delete: NO_ACTION }
+    indexes:
+      - { name: ix_ticket_project_archived_status, columns: [project_id, archived_at, status], notes: "Cubre la query principal del kanban (3 columnas por proyecto)" }
+      - { name: ix_ticket_project_priority,        columns: [project_id, priority_id, archived_at] }
+      - { name: ix_ticket_created_by,              columns: [created_by] }
+    business_rules:
+      - "Status enforcing por CHECK constraint a nivel BD (defensa adicional al check de Prisma)."
+      - "Transiciones de estado LIBRES — sin máquina de estados (HU-07). Cualquier estado → cualquier otro."
+      - "archived_at != NULL = soft-deleted; nunca DELETE físico (HU-08)."
+      - "created_by NOT NULL es CRÍTICO (EC-MVP-02 score 6 ALTO). La app DEBE extraer user_id del JWT dentro del handler, no de un objeto request mutable por middleware async."
+      - "updated_at se actualiza en CADA mutación (incluido cambio de status)."
+      - "Cambiar status genera fila en audit_log en la MISMA transacción (HU-07)."
+      - "Edición y cambio de status REQUIEREN lock vigente del actor (HU-07 borde, secuencia.md)."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: ticket_assignee
+    category: join
+    description: "Relación N:M entre tickets y usuarios asignados."
+    columns:
+      - { name: ticket_id,   type: INT,           not_null: true }
+      - { name: user_id,     type: INT,           not_null: true }
+      - { name: assigned_at, type: DATETIME2(3),  not_null: true, default: "SYSUTCDATETIME()" }
+    constraints:
+      - { type: pk, name: pk_ticket_assignee, columns: [ticket_id, user_id] }
+    foreign_keys:
+      - { name: fk_ta_ticket, columns: [ticket_id], references: { table: ticket, columns: [id] }, on_delete: NO_ACTION }
+      - { name: fk_ta_user,   columns: [user_id],   references: { table: user,   columns: [id] }, on_delete: NO_ACTION }
+    indexes:
+      - { name: ix_ta_user, columns: [user_id], notes: "Soporta 'tickets asignados a mí'" }
+    business_rules:
+      - "Solo Admin del proyecto puede crear/eliminar asignaciones (HU-09)."
+      - "Cada usuario asignado debe ser miembro del proyecto del ticket (validación app en handler, no FK)."
+      - "INSERT dispara email fire-and-forget al usuario asignado (HU-15). Falla del email NO revierte la operación."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: ticket_tag
+    category: join
+    description: "Relación N:M entre tickets y etiquetas del catálogo global."
+    columns:
+      - { name: ticket_id, type: INT, not_null: true }
+      - { name: tag_id,    type: INT, not_null: true }
+    constraints:
+      - { type: pk, name: pk_ticket_tag, columns: [ticket_id, tag_id] }
+    foreign_keys:
+      - { name: fk_tt_ticket, columns: [ticket_id], references: { table: ticket, columns: [id] }, on_delete: NO_ACTION }
+      - { name: fk_tt_tag,    columns: [tag_id],    references: { table: tag,    columns: [id] }, on_delete: NO_ACTION }
+    indexes:
+      - { name: ix_tt_tag, columns: [tag_id], notes: "Filtro 'tickets con tag X'" }
+    business_rules:
+      - "Si se elimina un tag, la app primero borra las filas de ticket_tag (en transacción) antes de borrar el tag — preserva auditoría."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: comment
+    category: core
+    description: "Comentarios sobre tickets. Soft-deletable. No requieren lock del ticket."
+    columns:
+      - { name: id,         type: INT,            pk: true, identity: true }
+      - { name: ticket_id,  type: INT,            not_null: true }
+      - { name: user_id,    type: INT,            not_null: true }
+      - { name: body,       type: NVARCHAR(MAX),  not_null: true }
+      - { name: created_at, type: DATETIME2(3),   not_null: true, default: "SYSUTCDATETIME()" }
+      - { name: updated_at, type: DATETIME2(3),   not_null: true, default: "SYSUTCDATETIME()" }
+      - { name: deleted_at, type: DATETIME2(3),   not_null: false, notes: "soft delete" }
+    constraints:
+      - { type: check, name: ck_comment_body_nonempty, expression: "LEN(body) > 0" }
+    foreign_keys:
+      - { name: fk_comment_ticket, columns: [ticket_id], references: { table: ticket, columns: [id] }, on_delete: NO_ACTION }
+      - { name: fk_comment_user,   columns: [user_id],   references: { table: user,   columns: [id] }, on_delete: NO_ACTION }
+    indexes:
+      - { name: ix_comment_ticket_active, columns: [ticket_id, deleted_at], notes: "Listar comentarios activos de un ticket" }
+    business_rules:
+      - "Soft delete vía deleted_at (HU-11). Nunca DELETE físico."
+      - "El autor puede editar/eliminar; el Admin del proyecto solo puede ELIMINAR comentarios ajenos (no editar) (HU-11)."
+      - "NO requiere lock del ticket — los comentarios se pueden agregar mientras otro usuario edita (HU-10, PRD §2.4)."
+      - "Detección de menciones `@username` en `body` dispara email fire-and-forget a los mencionados (HU-16). Auto-mención NO notifica."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: audit_log
+    category: audit
+    description: |
+      Bitácora INMUTABLE de cambios en tickets. Fuente de verdad del dashboard de
+      métricas. NO se actualiza ni se elimina. En prod, el rol de aplicación
+      tiene DENY UPDATE/DELETE sobre esta tabla (defensa en profundidad).
+    columns:
+      - { name: id,         type: INT,            pk: true, identity: true }
+      - { name: ticket_id,  type: INT,            not_null: true }
+      - { name: field,      type: NVARCHAR(50),   not_null: true, notes: "En MVP siempre 'status'; reservado para otros campos auditados a futuro" }
+      - { name: old_value,  type: NVARCHAR(255),  not_null: false, notes: "NULL en eventos de creación si llegáramos a registrarlos" }
+      - { name: new_value,  type: NVARCHAR(255),  not_null: true }
+      - { name: actor_id,   type: INT,            not_null: true, notes: "EC-MVP-02 — NOT NULL enforced" }
+      - { name: timestamp,  type: DATETIME2(3),   not_null: true, default: "SYSUTCDATETIME()" }
+    foreign_keys:
+      - { name: fk_audit_ticket, columns: [ticket_id], references: { table: ticket, columns: [id] }, on_delete: NO_ACTION }
+      - { name: fk_audit_actor,  columns: [actor_id],  references: { table: user,   columns: [id] }, on_delete: NO_ACTION }
+    indexes:
+      - { name: ix_audit_ticket_time,        columns: [ticket_id, timestamp DESC], notes: "Historial de un ticket (orden cronológico inverso)" }
+      - { name: ix_audit_field_value_time,   columns: [field, new_value, timestamp], notes: "Dashboard 'cerrados por mes': WHERE field='status' AND new_value='Listo' GROUP BY MONTH(timestamp)" }
+    business_rules:
+      - "INMUTABLE — la app SOLO ejecuta INSERT y SELECT."
+      - "En producción: GRANT SELECT, INSERT TO app_user; DENY UPDATE, DELETE TO app_user (TC-203)."
+      - "actor_id NOT NULL crítico (EC-MVP-02): la app extrae user_id del JWT dentro del handler."
+      - "Cada cambio de ticket.status DEBE generar una fila aquí, en la MISMA transacción que el UPDATE de ticket. Si el INSERT del log falla, el UPDATE del ticket se revierte."
+      - "El dashboard 'cerrados por mes' se calcula desde aquí (NO desde ticket.status actual). Permite que un ticket cerrado en marzo y reabierto en abril aparezca en el conteo de marzo (HU-14 borde)."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: ticket_lock
+    category: state
+    description: |
+      Pessimistic lock por ticket. PK = ticket_id → solo un lock activo por
+      ticket. TTL configurable vía env LOCK_TIMEOUT_MINUTES (default 15).
+      Adquisición IDEMPOTENTE: si el mismo usuario re-adquiere su propio lock,
+      se renueva expires_at sin duplicar (EC-MVP-01 score 9 CRÍTICO).
+    columns:
+      - { name: ticket_id,  type: INT,           pk: true, notes: "PK = un solo lock por ticket" }
+      - { name: locked_by,  type: INT,           not_null: true }
+      - { name: locked_at,  type: DATETIME2(3),  not_null: true, default: "SYSUTCDATETIME()" }
+      - { name: expires_at, type: DATETIME2(3),  not_null: true, notes: "= locked_at + LOCK_TIMEOUT_MINUTES (default 15 min)" }
+    foreign_keys:
+      - { name: fk_lock_ticket, columns: [ticket_id], references: { table: ticket, columns: [id] }, on_delete: NO_ACTION }
+      - { name: fk_lock_user,   columns: [locked_by], references: { table: user,   columns: [id] }, on_delete: NO_ACTION }
+    indexes:
+      - { name: ix_lock_expires, columns: [expires_at], notes: "Cleanup de locks expirados / detección de expiración" }
+    business_rules:
+      - "Lock vencido (expires_at < SYSUTCDATETIME()) se trata como inexistente (HU-12 borde)."
+      - "Adquisición idempotente vía MERGE WITH (UPDLOCK, ROWLOCK) — patrón en api-contract.md §3.1 + secuencia.md."
+      - "Cambio de ticket.status REQUIERE lock vigente del actor (HU-07 borde, secuencia.md)."
+      - "Comentarios NO requieren ni respetan lock (PRD §2.4, HU-10)."
+      - "Force unlock (TC-307) DIFERIDO a v1.1 — no implementar en MVP."
+      - "Liberación: tras save exitoso (DELETE en misma transacción que el UPDATE), cancel del editor (DELETE explícito), o expiración natural por TTL."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - name: refresh_token
+    category: auth
+    description: |
+      Refresh tokens con rotación single-use. Cada token se consume al ser usado
+      para emitir uno nuevo; reuso del mismo hash → invalidación de toda la
+      cadena (signal de robo). Única tabla con DELETE físico permitido (cleanup
+      de tokens vencidos no es información auditable).
+    columns:
+      - { name: id,             type: INT,            pk: true, identity: true }
+      - { name: user_id,        type: INT,            not_null: true }
+      - { name: token_hash,     type: NVARCHAR(255),  not_null: true, notes: "SHA-256 del JWT crudo. El JWT crudo NUNCA se persiste." }
+      - { name: issued_at,      type: DATETIME2(3),   not_null: true, default: "SYSUTCDATETIME()" }
+      - { name: expires_at,     type: DATETIME2(3),   not_null: true, notes: "issued_at + JWT_REFRESH_TTL (default 7d)" }
+      - { name: consumed_at,    type: DATETIME2(3),   not_null: false, notes: "NOT NULL = ya fue usado para emitir uno nuevo" }
+      - { name: replaced_by_id, type: INT,            not_null: false, notes: "FK al refresh_token sucesor en la cadena de rotación" }
+      - { name: revoked_at,     type: DATETIME2(3),   not_null: false, notes: "NOT NULL = la cadena fue invalidada por reuso detectado" }
+    constraints:
+      - { type: unique, name: uq_refresh_hash, columns: [token_hash] }
+    foreign_keys:
+      - { name: fk_refresh_user,        columns: [user_id],        references: { table: user,           columns: [id] }, on_delete: NO_ACTION }
+      - { name: fk_refresh_replaced_by, columns: [replaced_by_id], references: { table: refresh_token, columns: [id] }, on_delete: NO_ACTION }
+    indexes:
+      - { name: ix_refresh_user_active, columns: [user_id, expires_at], notes: "Tokens activos de un usuario" }
+      - { name: ix_refresh_hash,        columns: [token_hash], unique: true }
+    business_rules:
+      - "Single-use: cada token solo se canjea una vez. Doble uso del mismo hash → 401 refresh_expired Y revoked_at se setea en TODA la cadena (recorre replaced_by_id)."
+      - "Cleanup permitido: hard-DELETE de filas donde expires_at < NOW() - 30d. Es la ÚNICA tabla con DELETE físico autorizado."
+      - "consumed != revoked: consumed = uso normal, revoked = matamos la cadena por sospecha de robo."
+      - "El JWT crudo SOLO existe en tránsito (response al cliente). En BD vive solo el hash."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Estrategia de migraciones
+# ─────────────────────────────────────────────────────────────────────────────
+migrations_strategy:
+  tool: "Prisma Migrate"
+  command: "pnpm prisma migrate dev"
+  source_of_truth: |
+    backend/prisma/schema.prisma es la implementación operativa.
+    Este YAML es la especificación canónica (revisable en code review sin abrir
+    Prisma). Cualquier divergencia se considera bug del schema.prisma.
+  ordering: |
+    Crear en este orden para respetar FKs:
+      1. user
+      2. priority (con seed: Alta/Media/Baja)
+      3. tag (con seed: bug/feature/mejora/seguridad/deuda-técnica)
+      4. project
+      5. project_member
+      6. ticket
+      7. ticket_assignee, ticket_tag
+      8. comment
+      9. audit_log
+      10. ticket_lock
+      11. refresh_token
+  ddl_notes:
+    - "[order] de priority requiere brackets en T-SQL (palabra reservada). Prisma usa @map para resolverlo."
+    - "DATETIME2(3) sobre DATETIMEOFFSET porque toda la app maneja UTC; evitar mezclar tipos."
+    - "ON DELETE NO_ACTION en TODAS las FKs — soft delete es la política universal."
+    - "Indexes con DESC: en SQL Server sintaxis 'CREATE INDEX ... ON tabla (col DESC)'."
+    - "Prisma genera el CHECK constraint para el enum TicketStatus mapeado a strings en español."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Notas de despliegue
+# ─────────────────────────────────────────────────────────────────────────────
+deployment_notes:
+  database_creation: |
+    En el laptop de desarrollo se reutiliza el container `SQLServer2022` (puerto
+    1433, ver memory/project_minijira_runtime_env.md). La base `minijira` se crea
+    una sola vez con:
+
+      wsl docker exec -i SQLServer2022 /opt/mssql-tools18/bin/sqlcmd \
+        -S localhost -U sa -P '<password>' -No \
+        -Q "IF DB_ID('minijira') IS NULL CREATE DATABASE minijira"
+
+  app_user_grants: |
+    Para staging+ (NO automatizado en `prisma migrate dev`):
+
+      -- Login y user de aplicación
+      CREATE LOGIN minijira_app WITH PASSWORD = '<rotate>';
+      USE minijira;
+      CREATE USER minijira_app FOR LOGIN minijira_app;
+      GRANT SELECT, INSERT, UPDATE, DELETE ON SCHEMA::dbo TO minijira_app;
+
+      -- Inmutabilidad de audit_log (defensa en profundidad)
+      DENY UPDATE ON OBJECT::dbo.audit_log TO minijira_app;
+      DENY DELETE ON OBJECT::dbo.audit_log TO minijira_app;
+
+    En dev usamos `sa` por simplicidad; los grants estrictos van en staging+.
+
+  cleanup_jobs: |
+    Job programado (sql agent o cron) recomendado en producción:
+
+      -- limpieza de refresh tokens vencidos
+      DELETE FROM refresh_token
+       WHERE expires_at < DATEADD(day, -30, SYSUTCDATETIME());
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trazabilidad de reglas críticas → tablas/columnas
+# ─────────────────────────────────────────────────────────────────────────────
+critical_rules_traceability:
+  - rule: "EC-MVP-01 — POST /tickets/:id/lock idempotente"
+    tables: [ticket_lock]
+    enforcement: "MERGE WITH (UPDLOCK, ROWLOCK) en handler; PK ticket_id garantiza unicidad"
+  - rule: "EC-MVP-02 — created_by/actor_id NOT NULL bajo concurrencia"
+    tables: [ticket, audit_log]
+    enforcement: "NOT NULL constraint a nivel BD + extracción de user_id del JWT dentro del handler (no de req mutable)"
+  - rule: "TC-203 — AuditLog inmutable"
+    tables: [audit_log]
+    enforcement: "Sin endpoints UPDATE/DELETE en API + DENY UPDATE/DELETE al rol de aplicación en prod"
+  - rule: "HU-07 — Cambio de status requiere lock"
+    tables: [ticket, ticket_lock, audit_log]
+    enforcement: "Validación a nivel handler (PATCH /tickets/:id/status); UPDATE+INSERT+DELETE en una transacción"
+  - rule: "HU-15 — Email a asignados sin bloquear"
+    tables: [ticket_assignee]
+    enforcement: "Side-effect del INSERT — fire-and-forget en handler; falla no revierte"
+  - rule: "Refresh rotation single-use"
+    tables: [refresh_token]
+    enforcement: "consumed_at en cada uso; reuso → revoked_at en toda la cadena recorriendo replaced_by_id"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Estado del documento
+# ─────────────────────────────────────────────────────────────────────────────
+status:
+  version: "1.0"
+  approved: true
+  approved_on: "2026-05-06"
+  next_step: "Implementar como backend/prisma/schema.prisma."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Decisiones aplicadas tras aprobación
+# ─────────────────────────────────────────────────────────────────────────────
+applied_decisions:
+  - decision: "priority/tag SIN created_at/updated_at"
+    rationale: "Catálogos admin-only de bajo volumen. Si llega la necesidad de auditar cambios, se agregan como migración aditiva."
+  - decision: "user.email con collation Latin1_General_CI_AS explícita per-column"
+    rationale: "Defensa contra deploy sobre servers SQL Server con collation default case-sensitive (raro pero existe)."
+  - decision: "ticket.title NO lleva check redundante LEN <= 255"
+    rationale: "El tipo NVARCHAR(255) ya lo enforza; constraint sería ruido."

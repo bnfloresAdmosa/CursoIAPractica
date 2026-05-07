@@ -1,0 +1,27 @@
+# Mini Jira API — compose para el backend Express+Prisma.
+# La BD (SQL Server) NO se incluye aquí: corre en el container existente
+# `SQLServer2022` (ver memory/project_minijira_runtime_env.md). DATABASE_URL
+# del .env apunta a la IP WSL2 donde escucha SQL Server.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: minijira-backend
+    image: minijira-backend:latest
+    restart: unless-stopped
+    ports:
+      - "3030:3030"
+    env_file:
+      - .env
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://localhost:3030/api/v1/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 3

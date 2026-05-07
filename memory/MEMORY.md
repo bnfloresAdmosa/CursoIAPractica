@@ -1,0 +1,8 @@
+- [Docker via WSL](user_docker_via_wsl.md) — los comandos `docker` deben prefijarse con `wsl ` desde PowerShell en la máquina del usuario.
+- [Mini Jira — DB override a SQL Server](project_db_override.md) — el usuario anuló ADR-001 (Supabase/Postgres) y eligió SQL Server 2022 para todos los ambientes del proyecto Mini Jira.
+- [Mini Jira — entorno de ejecución local](project_minijira_runtime_env.md) — reusa container `SQLServer2022` existente; backend en `:3030` porque `:3000` lo tiene Grafana.
+- [Validar prompts del curso de alto impacto](feedback_validate_course_prompts.md) — pausar y pedir confirmación explícita antes de borrar archivos, bajar deps o anular decisiones previas; preferir edits quirúrgicos.
+- [Mini Jira — API contract v1 aprobado](project_api_contract.md) — `api-contract.md` es la fuente de verdad para los endpoints del backend; decisiones canónicas (envelope plano, IDs int, status en español, lock idempotente, refresh rotation single-use).
+- [Mini Jira — database schema v1 aprobado](project_db_schema.md) — `database-schema.yaml` es la spec canónica del schema SQL Server (11 tablas, audit_log inmutable, ticket_lock idempotente, refresh_token con rotación).
+- [No ejecutar en setup activities](feedback_no_execute_for_setup_activities.md) — desde testing/dockerización: sólo crear archivos, NO correr `pnpm install`/`docker`/`exec`/typecheck. El usuario instala y verifica.
+- [Convención de tests](project_test_setup.md) — Vitest + Supertest + vi.mock('@/db/prisma'); 3 tests por endpoint P0 (Happy/Validation/Edge); setup global inyecta env vars antes de lib/env.

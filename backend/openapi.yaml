@@ -1,0 +1,847 @@
+openapi: 3.0.0
+info:
+  title: Mini Jira API
+  version: 1.0.0
+  description: "API de Mini Jira. Spec canónica en `api-contract.md` (raíz del
+    repo). Envelope: REST plano en éxito, `{error: {code, message, details?}}`
+    en errores."
+servers:
+  - url: /api/v1
+    description: Base path
+tags:
+  - name: auth
+    description: Login / refresh / logout
+  - name: projects
+    description: CRUD de proyectos
+  - name: tickets
+    description: CRUD de tickets
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    ApiError:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties:
+                nullable: true
+          required:
+            - code
+            - message
+      required:
+        - error
+    LoginRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          example: ana@empresa.com
+        password:
+          type: string
+          minLength: 1
+          example: password123
+      required:
+        - email
+        - password
+    UserSummary:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+      required:
+        - id
+        - name
+        - email
+    LoginResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        expiresIn:
+          type: integer
+        user:
+          $ref: "#/components/schemas/UserSummary"
+        roles:
+          type: object
+          additionalProperties:
+            type: string
+            enum:
+              - ADMIN
+              - USER
+      required:
+        - accessToken
+        - refreshToken
+        - expiresIn
+        - user
+        - roles
+    RefreshRequest:
+      type: object
+      properties:
+        refreshToken:
+          type: string
+      required:
+        - refreshToken
+    RefreshResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        expiresIn:
+          type: integer
+      required:
+        - accessToken
+        - refreshToken
+        - expiresIn
+    Project:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        archivedAt:
+          type: string
+          nullable: true
+          format: date-time
+        createdBy:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        myRole:
+          type: string
+          enum:
+            - ADMIN
+            - USER
+        memberCount:
+          type: integer
+        openTicketCount:
+          type: integer
+        lastActivityAt:
+          type: string
+          nullable: true
+          format: date-time
+      required:
+        - id
+        - name
+        - description
+        - archivedAt
+        - createdBy
+        - createdAt
+        - myRole
+        - memberCount
+        - openTicketCount
+        - lastActivityAt
+    ProjectListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Project"
+        nextCursor:
+          type: string
+          nullable: true
+        hasMore:
+          type: boolean
+      required:
+        - items
+        - nextCursor
+        - hasMore
+    CreateProjectRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+      required:
+        - name
+    UpdateProjectRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+          nullable: true
+    ProjectArchived:
+      type: object
+      properties:
+        id:
+          type: integer
+        archivedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - archivedAt
+    Priority:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        order:
+          type: integer
+      required:
+        - id
+        - name
+        - order
+    AssigneeSummary:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+      required:
+        - id
+        - name
+    TagSummary:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        color:
+          type: string
+      required:
+        - id
+        - name
+        - color
+    LockSummary:
+      type: object
+      properties:
+        lockedBy:
+          type: object
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+          required:
+            - id
+            - name
+        lockedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+      required:
+        - lockedBy
+        - lockedAt
+        - expiresAt
+    Ticket:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: &a1
+            - Por hacer
+            - En progreso
+            - Listo
+        priority:
+          $ref: "#/components/schemas/Priority"
+        projectId:
+          type: integer
+        createdBy:
+          type: integer
+        archivedAt:
+          type: string
+          nullable: true
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        assignees:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssigneeSummary"
+        tags:
+          type: array
+          items:
+            $ref: "#/components/schemas/TagSummary"
+        commentCount:
+          type: integer
+        lock:
+          allOf:
+            - $ref: "#/components/schemas/LockSummary"
+            - nullable: true
+      required:
+        - id
+        - title
+        - description
+        - status
+        - priority
+        - projectId
+        - createdBy
+        - archivedAt
+        - createdAt
+        - updatedAt
+        - assignees
+        - tags
+        - commentCount
+        - lock
+    TicketListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Ticket"
+        nextCursor:
+          type: string
+          nullable: true
+        hasMore:
+          type: boolean
+      required:
+        - items
+        - nextCursor
+        - hasMore
+    CreateTicketRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+        priorityId:
+          type: integer
+        status:
+          type: string
+          enum: *a1
+        assigneeIds:
+          type: array
+          items:
+            type: integer
+        tagIds:
+          type: array
+          items:
+            type: integer
+      required:
+        - title
+        - priorityId
+    TicketArchived:
+      type: object
+      properties:
+        id:
+          type: integer
+        archivedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - archivedAt
+    ChangeStatusRequest:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: *a1
+      required:
+        - status
+  parameters: {}
+paths:
+  /auth/login:
+    post:
+      tags:
+        - auth
+      summary: Login con email + password
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Tokens emitidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          description: Credenciales inválidas (mensaje genérico)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: Validación
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /auth/refresh:
+    post:
+      tags:
+        - auth
+      summary: Rotar refresh token (single-use)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: Tokens rotados
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefreshResponse"
+        "401":
+          description: Refresh expirado/revocado/reusado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /auth/logout:
+    post:
+      tags:
+        - auth
+      summary: Logout — revoca refresh tokens activos del usuario
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: OK (sin body)
+        "401":
+          description: No autenticado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /projects:
+    get:
+      tags:
+        - projects
+      summary: Lista proyectos del usuario (paginación cursor)
+      security:
+        - bearerAuth: []
+      parameters:
+        - schema:
+            type: string
+            enum:
+              - "true"
+              - "false"
+          required: false
+          name: archived
+          in: query
+        - schema:
+            type: string
+          required: false
+          name: q
+          in: query
+        - schema:
+            type: string
+          required: false
+          name: cursor
+          in: query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          required: false
+          name: limit
+          in: query
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectListResponse"
+        "401":
+          description: No auth
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    post:
+      tags:
+        - projects
+      summary: Crear proyecto (creador queda como Admin)
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectRequest"
+      responses:
+        "201":
+          description: Creado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "422":
+          description: Validación
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /projects/{projectId}:
+    get:
+      tags:
+        - projects
+      summary: Detalle del proyecto
+      security:
+        - bearerAuth: []
+      parameters:
+        - schema:
+            type: integer
+            nullable: true
+          required: false
+          name: projectId
+          in: path
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "403":
+          description: No miembro
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No existe
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    patch:
+      tags:
+        - projects
+      summary: Editar proyecto (Admin del proyecto)
+      security:
+        - bearerAuth: []
+      parameters:
+        - schema:
+            type: integer
+            nullable: true
+          required: false
+          name: projectId
+          in: path
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProjectRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "403":
+          description: No Admin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: Validación
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /projects/{projectId}/archive:
+    patch:
+      tags:
+        - projects
+      summary: Archivar proyecto (soft delete idempotente)
+      security:
+        - bearerAuth: []
+      parameters:
+        - schema:
+            type: integer
+            nullable: true
+          required: false
+          name: projectId
+          in: path
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectArchived"
+        "403":
+          description: No Admin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /projects/{projectId}/tickets:
+    get:
+      tags:
+        - tickets
+      summary: Listar tickets del proyecto (paginación + filtros AND)
+      security:
+        - bearerAuth: []
+      parameters:
+        - schema:
+            type: integer
+            nullable: true
+          required: false
+          name: projectId
+          in: path
+        - schema:
+            type: string
+            description: 'Comma-list: "Por hacer,En progreso,Listo"'
+          required: false
+          name: status
+          in: query
+        - schema:
+            type: string
+            description: 'Comma-list de nombres: "Alta,Media,Baja"'
+          required: false
+          name: priority
+          in: query
+        - schema:
+            type: string
+            description: 'Comma-list de tag ids: "1,2"'
+          required: false
+          name: tag
+          in: query
+        - schema:
+            type: string
+            description: 'Comma-list de user ids: "4"'
+          required: false
+          name: assignee
+          in: query
+        - schema:
+            type: string
+          required: false
+          name: q
+          in: query
+        - schema:
+            type: string
+            enum:
+              - "true"
+              - "false"
+          required: false
+          name: archived
+          in: query
+        - schema:
+            type: string
+          required: false
+          name: cursor
+          in: query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          required: false
+          name: limit
+          in: query
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketListResponse"
+        "403":
+          description: No miembro
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    post:
+      tags:
+        - tickets
+      summary: Crear ticket en el proyecto (cualquier miembro)
+      security:
+        - bearerAuth: []
+      parameters:
+        - schema:
+            type: integer
+            nullable: true
+          required: false
+          name: projectId
+          in: path
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTicketRequest"
+      responses:
+        "201":
+          description: Creado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ticket"
+        "403":
+          description: No miembro
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: Validación
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /tickets/{ticketId}:
+    get:
+      tags:
+        - tickets
+      summary: Detalle de ticket
+      security:
+        - bearerAuth: []
+      parameters:
+        - schema:
+            type: integer
+            nullable: true
+          required: false
+          name: ticketId
+          in: path
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ticket"
+        "403":
+          description: No miembro
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No existe
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /tickets/{ticketId}/status:
+    patch:
+      tags:
+        - tickets
+      summary: Cambiar status del ticket (Admin o asignado; genera audit log; lock en
+        Phase B)
+      security:
+        - bearerAuth: []
+      parameters:
+        - schema:
+            type: integer
+            nullable: true
+          required: false
+          name: ticketId
+          in: path
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeStatusRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ticket"
+        "403":
+          description: Sin acceso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No existe
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: Validación
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /tickets/{ticketId}/archive:
+    patch:
+      tags:
+        - tickets
+      summary: Archivar ticket (soft delete, Admin del proyecto, idempotente)
+      security:
+        - bearerAuth: []
+      parameters:
+        - schema:
+            type: integer
+            nullable: true
+          required: false
+          name: ticketId
+          in: path
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketArchived"
+        "403":
+          description: No Admin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No existe
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"

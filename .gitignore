@@ -1,0 +1,39 @@
+node_modules/
+dist/
+build/
+.next/
+out/
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Build outputs
+*.tsbuildinfo
+
+# Prisma generated
+backend/prisma/*.db
+backend/prisma/*.db-journal
+
+# Coverage
+coverage/
+
+# Playwright
+playwright-report/
+test-results/

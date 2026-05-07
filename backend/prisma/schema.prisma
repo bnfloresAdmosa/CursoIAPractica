@@ -1,0 +1,225 @@
+// Mini Jira — Prisma schema
+// Provider: SQL Server (override de ADR-001 — ver CLAUDE.md §1).
+// Spec canónica: database-schema.yaml (raíz del repo, aprobado 2026-05-06).
+//
+// Convenciones:
+//   - Tablas en snake_case vía @@map / @map.
+//   - PKs: INT IDENTITY salvo Priority (catálogo cerrado con IDs hardcodeados).
+//   - FKs: onDelete: NoAction en TODAS (soft delete universal, sin cascadas).
+//   - Timestamps: DATETIME2 default SYSUTCDATETIME() vía @default(now()).
+//   - Status del ticket: enum mapeado a strings en español (Prisma genera CHECK).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+// ── Enums (no nativos en SQL Server) ──────────────────────────────────────
+// Prisma's SQL Server connector no soporta `enum`. Se modelan como strings
+// con CHECK constraints añadidos en una migración raw post-init:
+//   - ticket.status IN ('Por hacer', 'En progreso', 'Listo')
+//   - project_member.role IN ('ADMIN', 'USER')
+// El app layer (Zod) replica la validación. La unión literal en TS se define
+// en backend/src/lib/types.ts (cuando llegue la fase de handlers).
+
+// ── Catálogos ─────────────────────────────────────────────────────────────
+
+/// Catálogo cerrado de prioridades. IDs hardcodeados (1=Alta, 2=Media, 3=Baja).
+model Priority {
+  id    Int    @id
+  name  String @unique @db.NVarChar(50)
+  order Int    @unique @db.SmallInt @map("order")
+
+  tickets Ticket[]
+
+  @@map("priority")
+}
+
+/// Catálogo global de etiquetas. Cualquier Admin (de cualquier proyecto) puede CRUD.
+model Tag {
+  id    Int    @id @default(autoincrement())
+  name  String @unique @db.NVarChar(50)
+  color String @db.VarChar(7)
+
+  ticketTags TicketTag[]
+
+  @@index([name], map: "ix_tag_name")
+  @@map("tag")
+}
+
+// ── Core ──────────────────────────────────────────────────────────────────
+
+model User {
+  id           Int      @id @default(autoincrement())
+  name         String   @db.NVarChar(255)
+  email        String   @unique @db.NVarChar(255)
+  passwordHash String   @map("password_hash") @db.NVarChar(255)
+  createdAt    DateTime @default(now()) @map("created_at") @db.DateTime2
+
+  createdProjects Project[]        @relation("ProjectCreatedBy")
+  memberships     ProjectMember[]
+  createdTickets  Ticket[]         @relation("TicketCreatedBy")
+  assignedTickets TicketAssignee[]
+  comments        Comment[]
+  auditLogs       AuditLog[]       @relation("AuditActor")
+  ticketLocks     TicketLock[]     @relation("LockOwner")
+  refreshTokens   RefreshToken[]
+
+  @@index([email], map: "ix_user_email")
+  @@map("user")
+}
+
+model Project {
+  id          Int       @id @default(autoincrement())
+  name        String    @db.NVarChar(255)
+  description String?   @db.NVarChar(Max)
+  archivedAt  DateTime? @map("archived_at") @db.DateTime2
+  createdBy   Int       @map("created_by")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime2
+
+  creator User             @relation("ProjectCreatedBy", fields: [createdBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  members ProjectMember[]
+  tickets Ticket[]
+
+  @@index([archivedAt], map: "ix_project_archived_at")
+  @@index([createdBy], map: "ix_project_created_by")
+  @@map("project")
+}
+
+model ProjectMember {
+  userId    Int      @map("user_id")
+  projectId Int      @map("project_id")
+  role      String   @db.NVarChar(10)
+  addedAt   DateTime @default(now()) @map("added_at") @db.DateTime2
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  project Project @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([userId, projectId])
+  @@index([projectId, role], map: "ix_pm_project_role")
+  @@index([userId], map: "ix_pm_user")
+  @@map("project_member")
+}
+
+model Ticket {
+  id          Int          @id @default(autoincrement())
+  title       String       @db.NVarChar(255)
+  description String?      @db.NVarChar(Max)
+  status      String       @default("Por hacer") @db.NVarChar(20)
+  priorityId  Int          @map("priority_id")
+  projectId   Int          @map("project_id")
+  createdBy   Int          @map("created_by")
+  archivedAt  DateTime?    @map("archived_at") @db.DateTime2
+  createdAt   DateTime     @default(now()) @map("created_at") @db.DateTime2
+  updatedAt   DateTime     @updatedAt @map("updated_at") @db.DateTime2
+
+  priority  Priority         @relation(fields: [priorityId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  project   Project          @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  creator   User             @relation("TicketCreatedBy", fields: [createdBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  assignees TicketAssignee[]
+  tags      TicketTag[]
+  comments  Comment[]
+  auditLogs AuditLog[]
+  lock      TicketLock?
+
+  @@index([projectId, archivedAt, status], map: "ix_ticket_project_archived_status")
+  @@index([projectId, priorityId, archivedAt], map: "ix_ticket_project_priority")
+  @@index([createdBy], map: "ix_ticket_created_by")
+  @@map("ticket")
+}
+
+model TicketAssignee {
+  ticketId   Int      @map("ticket_id")
+  userId     Int      @map("user_id")
+  assignedAt DateTime @default(now()) @map("assigned_at") @db.DateTime2
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user   User   @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([ticketId, userId])
+  @@index([userId], map: "ix_ta_user")
+  @@map("ticket_assignee")
+}
+
+model TicketTag {
+  ticketId Int @map("ticket_id")
+  tagId    Int @map("tag_id")
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([ticketId, tagId])
+  @@index([tagId], map: "ix_tt_tag")
+  @@map("ticket_tag")
+}
+
+model Comment {
+  id        Int       @id @default(autoincrement())
+  ticketId  Int       @map("ticket_id")
+  userId    Int       @map("user_id")
+  body      String    @db.NVarChar(Max)
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime2
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.DateTime2
+  deletedAt DateTime? @map("deleted_at") @db.DateTime2
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user   User   @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([ticketId, deletedAt], map: "ix_comment_ticket_active")
+  @@map("comment")
+}
+
+/// Bitácora INMUTABLE. App solo INSERT/SELECT. En prod: DENY UPDATE/DELETE al rol app.
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  ticketId  Int      @map("ticket_id")
+  field     String   @db.NVarChar(50)
+  oldValue  String?  @map("old_value") @db.NVarChar(255)
+  newValue  String   @map("new_value") @db.NVarChar(255)
+  actorId   Int      @map("actor_id")
+  timestamp DateTime @default(now()) @db.DateTime2
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  actor  User   @relation("AuditActor", fields: [actorId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([ticketId, timestamp(sort: Desc)], map: "ix_audit_ticket_time")
+  @@index([field, newValue, timestamp], map: "ix_audit_field_value_time")
+  @@map("audit_log")
+}
+
+/// Pessimistic lock. PK = ticket_id (un solo lock por ticket). TTL via env LOCK_TIMEOUT_MINUTES.
+model TicketLock {
+  ticketId  Int      @id @map("ticket_id")
+  lockedBy  Int      @map("locked_by")
+  lockedAt  DateTime @default(now()) @map("locked_at") @db.DateTime2
+  expiresAt DateTime @map("expires_at") @db.DateTime2
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user   User   @relation("LockOwner", fields: [lockedBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([expiresAt], map: "ix_lock_expires")
+  @@map("ticket_lock")
+}
+
+/// Refresh tokens con rotación single-use. Única tabla con DELETE físico permitido (cleanup).
+model RefreshToken {
+  id           Int       @id @default(autoincrement())
+  userId       Int       @map("user_id")
+  tokenHash    String    @unique @map("token_hash") @db.NVarChar(255)
+  issuedAt     DateTime  @default(now()) @map("issued_at") @db.DateTime2
+  expiresAt    DateTime  @map("expires_at") @db.DateTime2
+  consumedAt   DateTime? @map("consumed_at") @db.DateTime2
+  replacedById Int?      @map("replaced_by_id")
+  revokedAt    DateTime? @map("revoked_at") @db.DateTime2
+
+  user         User           @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  replacedBy   RefreshToken?  @relation("RefreshChain", fields: [replacedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  predecessors RefreshToken[] @relation("RefreshChain")
+
+  @@index([userId, expiresAt], map: "ix_refresh_user_active")
+  @@map("refresh_token")
+}

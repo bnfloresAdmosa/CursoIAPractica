@@ -1,0 +1,44 @@
+# Build artefactos y deps
+node_modules
+dist
+.tsbuildinfo
+*.tsbuildinfo
+
+# Tests y coverage
+coverage
+**/*.test.ts
+src/test
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Git y CI
+.git
+.gitignore
+.github
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Templates (no se copian, pero por seguridad)
+.env.example
+
+# Prisma local artefacts (se copian sólo lo necesario via Dockerfile)
+prisma/migrations/.archived
+
+# Docker meta
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Archivos de root del repo que no necesita el backend
+README.md
+*.md
+
+# Nota: NO se excluye .env aquí — docker-compose lo lee del host vía env_file
+# y nunca se COPIA al image (el Dockerfile copia paths específicos, no `.`).

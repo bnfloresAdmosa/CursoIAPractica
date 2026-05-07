@@ -1,0 +1,27 @@
+# Fallback "greenfield" para entornos donde NO existe ya un container `SQLServer2022`.
+# En el laptop de desarrollo actual se reutiliza ese container existente
+# (`wsl docker ps` lo lista en :1433). Si lo levantas aquí teniendo el otro arriba,
+# el bind a :1433 fallará — primero detén el otro o cambia el host port.
+
+services:
+  db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: minijira-db
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-Mini_Jira_Dev_2026!}
+      MSSQL_PID: Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssql_data:/var/opt/mssql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -No -Q "SELECT 1" || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  mssql_data:
